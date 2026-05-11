@@ -6,7 +6,7 @@ permissions:
   packages: read
 
 on:
-  # the build for main is run periodically and cancelled if there are no changes since the last run
+  # the build for main is run periodically and canceled if there are no changes since the last run
   schedule:
     - cron: '0 */12 * * *'
   push:
@@ -118,9 +118,6 @@ env:
   JVM_TEST_NORMAL_TESTS_SELECTOR: "-pl !docs -Dno-test-modules"
   #PTS_MAVEN_ARGS: "-Ddevelocity.pts.enabled=${{ github.event_name == 'pull_request' && github.base_ref == 'main' && 'true' || 'false' }}"
   PTS_MAVEN_ARGS: ""
-  DB_USER: hibernate_orm_test
-  DB_PASSWORD: hibernate_orm_test
-  DB_NAME: hibernate_orm_test
   PULL_REQUEST_NUMBER: ${{ github.event.number }}
   MVNW_REPOURL: https://maven-central.storage-download.googleapis.com/maven2
 
@@ -1736,10 +1733,10 @@ jobs:
 
   oracle-test-pilot-jvm-tests:
     name: Oracle Test Pilot ${{matrix.category}} - JDK ${{matrix.java-version}}
-    # TODO use Oracle Test Pilot runners
-    runs-on: ubuntu-latest
+    runs-on: [ self-hosted, Linux, X64, OracleTestPilot ]
     # Shared environment: make extra sure not to leak a GitHub token with any permission.
-    permissions: {}
+    permissions:
+      contents: read
     needs: [configure, build-jdk17, calculate-test-jobs]
     # TODO Oracle Test Pilot involves specific runners that are only available in the main repo; prepend "github.repository == 'quarkusio/quarkus' &&"
     if: needs.calculate-test-jobs.outputs.otp_jvm_matrix != '{}'
@@ -1747,7 +1744,7 @@ jobs:
       COMMON_MAVEN_ARGS: ${{ needs.configure.outputs.common-maven-args }}
     timeout-minutes: ${{matrix.timeout}}
     strategy:
-      max-parallel: ${{ fromJson(needs.configure.outputs.config).maxParallel || 12 }}
+      max-parallel: ${{ fromJson(needs.configure.outputs.config).maxParallel || 5 }}
       fail-fast: false
       matrix: ${{ fromJson(needs.calculate-test-jobs.outputs.otp_jvm_matrix) }}
     steps:
@@ -1756,6 +1753,7 @@ jobs:
           category=$(echo -n '${{matrix.category}}' | tr '[:upper:]' '[:lower:]' | tr -c '[:alnum:]-' '-' | sed -E 's/-+/-/g')
           echo "GE_TAGS=oracle-test-pilot-${{matrix.category}}-jdk-${{matrix.java-version}}" >> "$GITHUB_ENV"
           echo "GE_CUSTOM_VALUES=gh-job-name=Oracle Test Pilot ${{matrix.category}} - JDK ${{matrix.java-version}}" >> "$GITHUB_ENV"
+      # TODO: use sha1 instead of v6
       - uses: actions/checkout@v6
       - name: Restore Maven Repository
         uses: actions/cache/restore@v5
@@ -1772,6 +1770,7 @@ jobs:
           path: .
       - name: Extract previously uploaded .m2 content
         run: tar -xzf m2-content.tgz -C ~
+      # TODO: switch to GraalVM
       - name: Set up JDK 17
         uses: actions/setup-java@be666c2fcd27ec809703dec50e508c2fdc7f6654 # v5.2.0
         with:
@@ -1786,81 +1785,48 @@ jobs:
           add-job-summary: false
           develocity-access-key: ${{ secrets.GRADLE_ENTERPRISE_ACCESS_KEY }}
           develocity-token-expiry: 6
-      - name: Create Oracle Test Pilot DB
+      - name: Create Oracle Test Pilot Database
         id: create_database
-        # TODO Oracle Test Pilot DB creation
-        run: |
-          PASSWORD=Oracle23
-          echo "::add-mask::$PASSWORD"
-          echo "database_password=${PASSWORD}" >> $GITHUB_OUTPUT
-          echo "connection_string_suffix=localhost:1521/freepdb1" >> $GITHUB_OUTPUT
-          docker run --name oracle -d -p 1521:1521 -e ORACLE_PASSWORD=Oracle23Admin \
-            -e APP_USER=quarkus_test \
-            -e APP_USER_PASSWORD=$PASSWORD \
-            --health-cmd healthcheck.sh \
-            --health-interval 5s \
-            --health-timeout 5s \
-            --health-retries 10 \
-            docker.io/gvenzl/oracle-free:23
-          HEALTHSTATUS=""
-          TIMEOUT=300
-          ELAPSED=0
-          until [ "$HEALTHSTATUS" == "healthy" ];
-          do
-          if [ $ELAPSED -ge $TIMEOUT ]; then
-          echo "Timeout waiting for Oracle Free to start after ${TIMEOUT}s"
-          echo "Container logs:"
-          docker logs oracle
-          exit 1
-          fi
-          echo "Waiting for Oracle Free to start... (${ELAPSED}s/${TIMEOUT}s)"
-          sleep 5
-          ELAPSED=$((ELAPSED + 5))
-          HEALTHSTATUS="`docker inspect -f '{{.State.Health.Status}}' oracle`"
-          HEALTHSTATUS=${HEALTHSTATUS##+( )} #Remove longest matching series of spaces from the front
-          HEALTHSTATUS=${HEALTHSTATUS%%+( )} #Remove longest matching series of spaces from the back
-          done
-          sleep 2;
-          echo "Oracle successfully started"
-      #        uses: oracle-actions/setup-testpilot@f620f11f9f26dacfe80ba1823342e3e92604c55f # v1.0.23
-      #        with:
-      #          oci-service: ${{ matrix.category }}
-      #          action: create
-      #          user: quarkus_test
+        uses: oracle-actions/setup-testpilot@f620f11f9f26dacfe80ba1823342e3e92604c55f # v1.0.23
+        with:
+          oci-service: ${{ matrix.category }}
+          action: create
+          user: quarkus_test
       - name: Build
         env:
           # Begin OTP setup
-          TESTPILOT_MAVEN_ARGS: >-
-            -Doracle.jdbc.url=jdbc:oracle:thin:@${{ steps.create_database.outputs.connection_string_suffix }}?oracle.jdbc.enableQueryResultCache=false
-            -Doracle.reactive.url=vertx-reactive:oracle:thin:@${{ steps.create_database.outputs.connection_string_suffix }}?oracle.jdbc.enableQueryResultCache=false
-            -Doracle.username=quarkus_test
-            -Doracle.password=${{ steps.create_database.outputs.database_password }}
-          RDBMS: ${{ matrix.category }} # TODO may be useless?
-          RUNID: ${{ github.run_number }} # TODO may be useless?
-          API_HOST: "" # TODO may be useless?
-          TESTPILOT_CLIENT_ID: "" # TODO may be useless?
-          TESTPILOT_TOKEN: "" # TODO may be useless?
+          TESTPILOT_USERNAME: quarkus_test_${{ github.run_number }}
+          TESTPILOT_PASSWORD: ${{ steps.create_database.outputs.database_password }}
+          TESTPILOT_CONNECTION_STRING_SUFFIX_WDQ: ${{ steps.create_database.outputs.connection_string_suffix }}
+          RDBMS: ${{ matrix.category }}
+          RUNID: ${{ github.run_number }}
+          API_HOST: ""
+          TESTPILOT_CLIENT_ID: ""
+          TESTPILOT_TOKEN: ""
           # Needed for TFO (TCP fast open)
-          # TODO uncomment once running on actual testpilot machines
           #LD_PRELOAD: /home/ubuntu/libtfojdbc1.so
           #LD_LIBRARY_PATH: /home/ubuntu
           # End OTP setup
           TEST_MODULES: ${{matrix.test-modules}}
           CAPTURE_BUILD_SCAN: true
         run: |
-          export LANG=en_US && ./mvnw $COMMON_MAVEN_ARGS $COMMON_TEST_MAVEN_ARGS $PTS_MAVEN_ARGS \
-            $JVM_TEST_MAVEN_ARGS $TESTPILOT_MAVEN_ARGS \
+          export LANG=en_US && export TESTPILOT_CONNECTION_STRING_SUFFIX=`echo "${TESTPILOT_CONNECTION_STRING_SUFFIX_WDQ:1:-1}"` \
+            && ./mvnw $COMMON_MAVEN_ARGS $COMMON_TEST_MAVEN_ARGS $PTS_MAVEN_ARGS \
+            $JVM_TEST_MAVEN_ARGS \
+            -Doracle.jdbc.url=jdbc:oracle:thin:@${TESTPILOT_CONNECTION_STRING_SUFFIX} \
+            -Doracle.reactive.url=vertx-reactive:oracle:thin:@${TESTPILOT_CONNECTION_STRING_SUFFIX} \
+            -Doracle.username=${TESTPILOT_USERNAME} \
+            -Doracle.password=${TESTPILOT_PASSWORD} \
             -f integration-tests -pl "$TEST_MODULES" \
             clean install
-      - name: Delete Oracle Test Pilot DB
-        if: always()
-        # TODO Oracle Test Pilot DB deletion
-        run: docker rm -f oracle || true
-      #        uses: oracle-actions/setup-testpilot@f620f11f9f26dacfe80ba1823342e3e92604c55f # v1.0.23
-      #        with:
-      #          oci-service: ${{ matrix.category }}
-      #          action: delete
-      #          user: quarkus_test_1
+      - name: Delete Oracle Test Pilot Database
+        id: delete_database
+        if: always() && steps.create_database.outcome == 'success'
+        uses: oracle-actions/setup-testpilot@f620f11f9f26dacfe80ba1823342e3e92604c55f # v1.0.23
+        with:
+          oci-service: ${{ matrix.category }}
+          action: delete
+          user: quarkus_test
       - name: Prepare build reports archive
         if: always()
         run: |
@@ -1880,10 +1846,10 @@ jobs:
 
   oracle-test-pilot-native-tests:
     name: "Oracle Test Pilot ${{matrix.category}} - Native"
-    # TODO use Oracle Test Pilot runners
-    runs-on: ubuntu-latest
+    runs-on: [ self-hosted, Linux, X64, OracleTestPilot ]
     # Shared environment: make extra sure not to leak a GitHub token with any permission.
-    permissions: {}
+    permissions:
+      contents: read
     needs: [configure, build-jdk17, calculate-test-jobs]
     # TODO Oracle Test Pilot involves specific runners that are only available in the main repo; prepend "github.repository == 'quarkusio/quarkus' &&"
     if: needs.calculate-test-jobs.outputs.otp_native_matrix != '{}'
@@ -1891,7 +1857,7 @@ jobs:
       COMMON_MAVEN_ARGS: ${{ needs.configure.outputs.common-maven-args }}
     timeout-minutes: ${{matrix.timeout}}
     strategy:
-      max-parallel: ${{ fromJson(needs.configure.outputs.config).maxParallel || 12 }}
+      max-parallel: ${{ fromJson(needs.configure.outputs.config).maxParallel || 5 }}
       fail-fast: false
       matrix: ${{ fromJson(needs.calculate-test-jobs.outputs.otp_native_matrix) }}
     steps:
@@ -1900,6 +1866,7 @@ jobs:
           category=$(echo -n '${{matrix.category}}' | tr '[:upper:]' '[:lower:]' | tr -c '[:alnum:]-' '-' | sed -E 's/-+/-/g')
           echo "GE_TAGS=oracle-test-pilot-${{matrix.category}}-native" >> "$GITHUB_ENV"
           echo "GE_CUSTOM_VALUES=gh-job-name=Oracle Test Pilot ${{matrix.category}} - Native" >> "$GITHUB_ENV"
+      # TODO: use sha1 instead of v6
       - uses: actions/checkout@v6
       - name: Restore Maven Repository
         uses: actions/cache/restore@v5
@@ -1939,81 +1906,48 @@ jobs:
           add-job-summary: false
           develocity-access-key: ${{ secrets.GRADLE_ENTERPRISE_ACCESS_KEY }}
           develocity-token-expiry: 6
-      - name: Create Oracle Test Pilot DB
+      - name: Create Oracle Test Pilot Database
         id: create_database
-      # TODO Oracle Test Pilot DB creation
-        run: |
-          PASSWORD=Oracle23
-          echo "::add-mask::$PASSWORD"
-          echo "database_password=${PASSWORD}" >> $GITHUB_OUTPUT
-          echo "connection_string_suffix=localhost:1521/freepdb1" >> $GITHUB_OUTPUT
-          docker run --name oracle -d -p 1521:1521 -e ORACLE_PASSWORD=Oracle23Admin \
-            -e APP_USER=quarkus_test \
-            -e APP_USER_PASSWORD=$PASSWORD \
-            --health-cmd healthcheck.sh \
-            --health-interval 5s \
-            --health-timeout 5s \
-            --health-retries 10 \
-            docker.io/gvenzl/oracle-free:23
-          HEALTHSTATUS=""
-          TIMEOUT=300
-          ELAPSED=0
-          until [ "$HEALTHSTATUS" == "healthy" ];
-          do
-          if [ $ELAPSED -ge $TIMEOUT ]; then
-          echo "Timeout waiting for Oracle Free to start after ${TIMEOUT}s"
-          echo "Container logs:"
-          docker logs oracle
-          exit 1
-          fi
-          echo "Waiting for Oracle Free to start... (${ELAPSED}s/${TIMEOUT}s)"
-          sleep 5
-          ELAPSED=$((ELAPSED + 5))
-          HEALTHSTATUS="`docker inspect -f '{{.State.Health.Status}}' oracle`"
-          HEALTHSTATUS=${HEALTHSTATUS##+( )} #Remove longest matching series of spaces from the front
-          HEALTHSTATUS=${HEALTHSTATUS%%+( )} #Remove longest matching series of spaces from the back
-          done
-          sleep 2;
-          echo "Oracle successfully started"
-#        uses: oracle-actions/setup-testpilot@f620f11f9f26dacfe80ba1823342e3e92604c55f # v1.0.23
-#        with:
-#          oci-service: ${{ matrix.category }}
-#          action: create
-#          user: quarkus_test
+        uses: oracle-actions/setup-testpilot@f620f11f9f26dacfe80ba1823342e3e92604c55f # v1.0.23
+        with:
+          oci-service: ${{ matrix.category }}
+          action: create
+          user: quarkus_test
       - name: Build
         env:
           # Begin OTP setup
-          TESTPILOT_MAVEN_ARGS: >-
-            -Doracle.jdbc.url=jdbc:oracle:thin:@${{ steps.create_database.outputs.connection_string_suffix }}?oracle.jdbc.enableQueryResultCache=false
-            -Doracle.reactive.url=vertx-reactive:oracle:thin:@${{ steps.create_database.outputs.connection_string_suffix }}?oracle.jdbc.enableQueryResultCache=false
-            -Doracle.username=quarkus_test
-            -Doracle.password=${{ steps.create_database.outputs.database_password }}
-          RDBMS: ${{ matrix.category }} # TODO may be useless?
-          RUNID: ${{ github.run_number }} # TODO may be useless?
-          API_HOST: "" # TODO may be useless?
-          TESTPILOT_CLIENT_ID: "" # TODO may be useless?
-          TESTPILOT_TOKEN: "" # TODO may be useless?
+          TESTPILOT_USERNAME: quarkus_test_${{ github.run_number }}
+          TESTPILOT_PASSWORD: ${{ steps.create_database.outputs.database_password }}
+          TESTPILOT_CONNECTION_STRING_SUFFIX_WDQ: ${{ steps.create_database.outputs.connection_string_suffix }}
+          RDBMS: ${{ matrix.category }}
+          RUNID: ${{ github.run_number }}
+          API_HOST: ""
+          TESTPILOT_CLIENT_ID: ""
+          TESTPILOT_TOKEN: ""
           # Needed for TFO (TCP fast open)
-          # TODO uncomment once running on actual testpilot machines
           #LD_PRELOAD: /home/ubuntu/libtfojdbc1.so
           #LD_LIBRARY_PATH: /home/ubuntu
           # End OTP setup
           TEST_MODULES: ${{matrix.test-modules}}
-          CONTAINER_BUILD: false # Docker is not available on Test Pilot
+          CONTAINER_BUILD: false # Docker is not available on Oracle Test Pilot
           CAPTURE_BUILD_SCAN: true
         run: |
-          export LANG=en_US && ./mvnw $COMMON_MAVEN_ARGS $COMMON_TEST_MAVEN_ARGS $PTS_MAVEN_ARGS \
-            $TESTPILOT_MAVEN_ARGS $NATIVE_TEST_MAVEN_ARGS -Dquarkus.native.container-build=true \
+          export LANG=en_US && export TESTPILOT_CONNECTION_STRING_SUFFIX=`echo "${TESTPILOT_CONNECTION_STRING_SUFFIX_WDQ:1:-1}"` \
+            && ./mvnw $COMMON_MAVEN_ARGS $COMMON_TEST_MAVEN_ARGS $PTS_MAVEN_ARGS \
+            -Doracle.jdbc.url=jdbc:oracle:thin:@${TESTPILOT_CONNECTION_STRING_SUFFIX} \
+            -Doracle.reactive.url=vertx-reactive:oracle:thin:@${TESTPILOT_CONNECTION_STRING_SUFFIX} \
+            -Doracle.username=${TESTPILOT_USERNAME} \
+            -Doracle.password=${TESTPILOT_PASSWORD} \
+            $NATIVE_TEST_MAVEN_ARGS -Dquarkus.native.container-build=false \
             -f integration-tests -pl "$TEST_MODULES"
-      - name: Delete Oracle Test Pilot DB
-        if: always()
-      # TODO Oracle Test Pilot DB deletion
-        run: docker rm -f oracle || true
-#        uses: oracle-actions/setup-testpilot@f620f11f9f26dacfe80ba1823342e3e92604c55f # v1.0.23
-#        with:
-#          oci-service: ${{ matrix.category }}
-#          action: delete
-#          user: quarkus_test_1
+      - name: Delete Oracle Test Pilot Database
+        id: delete_database
+        if: always() && steps.create_database.outcome == 'success'
+        uses: oracle-actions/setup-testpilot@f620f11f9f26dacfe80ba1823342e3e92604c55f # v1.0.23
+        with:
+          oci-service: ${{ matrix.category }}
+          action: delete
+          user: quarkus_test
       - name: Prepare build reports archive
         if: always()
         run: |
