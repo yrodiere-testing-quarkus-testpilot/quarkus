@@ -2003,7 +2003,7 @@ jobs:
           CAPTURE_BUILD_SCAN: true
         run: |
           export LANG=en_US && ./mvnw $COMMON_MAVEN_ARGS $COMMON_TEST_MAVEN_ARGS $PTS_MAVEN_ARGS \
-            $TESTPILOT_MAVEN_ARGS $NATIVE_TEST_MAVEN_ARGS -Dquarkus.native.container-build=true \
+            $TESTPILOT_MAVEN_ARGS $NATIVE_TEST_MAVEN_ARGS -Dquarkus.native.container-build=false \
             -f integration-tests -pl "$TEST_MODULES"
       - name: Delete Oracle Test Pilot DB
         if: always()
